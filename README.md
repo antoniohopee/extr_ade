@@ -50,7 +50,7 @@ automatico e ricorrente. Sulle fatture **emesse** non si pone il problema.
 ## Installazione
 
 ```bash
-git clone https://github.com/<utente>/extr_ade.git
+git clone https://github.com/antoniohopee/extr_ade.git
 cd extr_ade
 
 python3.12 -m venv .venv
