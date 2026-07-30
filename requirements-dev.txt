@@ -1,0 +1,4 @@
+# Dipendenze di sviluppo: servono per i test, non in produzione.
+-r requirements.txt
+
+pytest>=8.0

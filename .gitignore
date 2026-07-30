@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Istruzioni locali per Claude Code
+CLAUDE.md
+.claude/
+
+# Dati sensibili: fatture scaricate e stato sessione
+fatture/
+data/
+*.xml
+*.xml.p7m
+storage_state.json
+!tests/fixtures/*.xml

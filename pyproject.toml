@@ -1,0 +1,13 @@
+# Configurazione degli strumenti di sviluppo.
+#
+# Volutamente minimo: qui NON stiamo trasformando il progetto in un pacchetto
+# installabile (niente [project], niente [build-system]). Serve una cosa sola:
+# dire a pytest che il codice sta in `src/`, altrimenti `import extr_ade` nei
+# test fallisce con ModuleNotFoundError.
+#
+# Le dipendenze restano in requirements.txt / requirements-dev.txt: un solo
+# posto dove guardare, invece di due elenchi che possono divergere.
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

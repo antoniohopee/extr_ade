@@ -1,0 +1,20 @@
+# Dipendenze runtime.
+# Ogni riga ha una motivazione: se non sai perché c'è, va tolta.
+
+# Automazione del browser. Il portale AdE è un'applicazione JavaScript: le pagine
+# non esistono nell'HTML che il server manda, vengono costruite dal browser dopo.
+# Serve quindi un browser vero, non un semplice client HTTP.
+# Ha anche un vantaggio pratico: possiamo aprirlo visibile e fare i passaggi a
+# mano, leggendo URL e selettori reali invece di indovinarli.
+playwright>=1.45
+
+# Client HTTP. Scelto al posto di `requests` perché gestisce la sessione con
+# cookie allo stesso modo ma supporta HTTP/2 e ha timeout obbligatori di default
+# (evita lo script appeso per sempre su una richiesta che non torna).
+# Non sostituisce Playwright: serve per scaricare gli XML riusando i cookie
+# della sessione già aperta, se scopriamo che stanno dietro URL diretti.
+# Scaricare un file è l'unica cosa che un client HTTP fa meglio di un browser.
+httpx>=0.27
+
+# Carica le credenziali dal file .env in os.environ.
+python-dotenv>=1.0
