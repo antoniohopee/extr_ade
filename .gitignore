@@ -221,6 +221,9 @@ __marimo__/
 CLAUDE.md
 .claude/
 
+# Appunti personali: cose da fare, non documentazione pubblica
+TODO.md
+
 # Dati sensibili: fatture scaricate e stato sessione
 fatture/
 data/
