@@ -36,6 +36,7 @@ from extr_ade.constants import (
     NEXT_PAGE_NAME,
     PAGINATION_SELECTOR,
 )
+from extr_ade.login import describe_page
 
 # Limite di sicurezza sul numero di pagine da sfogliare. Se la paginazione si
 # comportasse in modo imprevisto (per esempio un "avanti" che non avanza),
@@ -45,6 +46,9 @@ MAX_PAGES = 200
 # Quanto aspettiamo che la tabella si riempia. La pagina è scritta in
 # AngularJS: il server risponde, e solo dopo il browser costruisce le righe.
 TABLE_TIMEOUT_MS = 30_000
+
+# Quante volte aspettiamo prima di dichiarare il guasto. Vedi `wait_for_table`.
+TABLE_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -189,17 +193,62 @@ def wait_for_table(page: Page) -> bool:
     è mai comparsa" a schermo si assomigliano, ma il primo è un risultato
     legittimo e il secondo è un guasto da sistemare. Confonderli significa
     concludere "non ho fatture" quando invece il programma è rotto.
+
+    Il guasto visto il 2026-08-06 era questo: la vista AngularJS della rotta
+    non si abilitava (`vm.canShow` restava falsa) e la tabella non veniva
+    proprio disegnata. Non era lentezza, e infatti riprovare non bastava.
+    Ricaricando la pagina l'applicazione riparte da zero sulla stessa rotta,
+    ed è il nostro ultimo tentativo prima di arrenderci.
+
+    ATTENZIONE, e vale la pena saperlo prima di stupirsi: il ricaricamento
+    riporta il form di ricerca ai valori predefiniti. Se avevi cercato per
+    date, dopo il recupero l'elenco è quello del periodo di default. Per
+    questo il recupero lo diciamo a schermo invece di farlo di nascosto: i
+    dati che leggi dopo potrebbero non essere quelli che avevi chiesto.
     """
-    try:
-        page.wait_for_selector(INVOICE_ROW_SELECTOR, timeout=TABLE_TIMEOUT_MS)
-        return True
-    except PlaywrightTimeout:
-        if page.locator("table").count():
-            return False  # la tabella c'è, semplicemente è vuota
-        raise RuntimeError(
-            "Tabella dei risultati non trovata. La pagina potrebbe essere "
-            "cambiata: ricontrolla INVOICE_ROW_SELECTOR in constants.py."
-        ) from None
+    result = _wait_for_rows(page, TABLE_ATTEMPTS)
+    if result is not None:
+        return result
+
+    print("  la tabella non compare: ricarico la pagina e riprovo...")
+    print("  (se avevi impostato delle date, vanno reimpostate)")
+    page.reload(wait_until="domcontentloaded")
+
+    result = _wait_for_rows(page, 1)
+    if result is not None:
+        print("  recuperata: la tabella c'è dopo il ricaricamento.")
+        return result
+
+    # Qui non c'è più niente da tentare. Salviamo l'HTML del momento esatto:
+    # senza, resta solo un messaggio d'errore, e l'unica volta che è successo
+    # ha mandato a controllare un selettore che era invece corretto.
+    describe_page(page, save_html_as="elenco_senza_tabella.html")
+    raise RuntimeError(
+        "Tabella dei risultati non comparsa, nemmeno dopo aver ricaricato la "
+        "pagina. Guarda l'HTML appena salvato: dice se la pagina è quella "
+        "giusta (allora è il portale che non risponde) o un'altra (allora è "
+        "la navigazione)."
+    ) from None
+
+
+def _wait_for_rows(page: Page, attempts: int) -> bool | None:
+    """Aspetta le righe per un dato numero di tentativi.
+
+    Tre esiti diversi, e servono tutti e tre distinti:
+    True  = ci sono righe;
+    False = c'è una tabella ma è vuota (nessuna fattura nel periodo);
+    None  = non c'è proprio una tabella, cioè non è un risultato ma un guasto.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            page.wait_for_selector(INVOICE_ROW_SELECTOR, timeout=TABLE_TIMEOUT_MS)
+            return True
+        except PlaywrightTimeout:
+            if page.locator("table").count():
+                return False  # la tabella c'è, semplicemente è vuota
+            if attempt < attempts:
+                print("  tabella non ancora comparsa, riprovo una volta...")
+    return None
 
 
 def parse_selection(text: str, count: int) -> list[int]:
