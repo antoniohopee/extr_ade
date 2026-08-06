@@ -13,11 +13,12 @@ import pytest
 
 from extr_ade.downloader import (
     INDEX_FILENAME,
-    already_downloaded,
     destination_dir,
     load_index,
+    registered_as,
     safe_filename,
     save_index,
+    stored_file,
 )
 from extr_ade.invoices import Invoice
 
@@ -68,32 +69,46 @@ def _fattura(detail_id: str = "0FPR00000000001") -> Invoice:
     )
 
 
-def test_riconosce_una_fattura_gia_scaricata(tmp_path: Path) -> None:
-    (tmp_path / "IT01234567890_AbCdE.xml").write_text("finto", encoding="utf-8")
+def test_riconosce_una_fattura_gia_scaricata() -> None:
     index = {"0FPR00000000001": "IT01234567890_AbCdE.xml"}
+    assert registered_as(_fattura(), index) == "IT01234567890_AbCdE.xml"
 
-    trovato = already_downloaded(tmp_path, _fattura(), index)
+
+def test_fattura_non_presente_nell_indice() -> None:
+    index = {"0FPR99999999999": "altra.xml"}
+    assert registered_as(_fattura(), index) is None
+
+
+def test_indice_vuoto() -> None:
+    assert registered_as(_fattura(), {}) is None
+
+
+def test_file_consegnato_resta_scaricato() -> None:
+    """L'indice dice che c'è, il file non c'è più: NON va riscaricata.
+
+    È il caso normale, non un'anomalia: gli XML vengono consegnati alla
+    contabilità e la cartella si svuota. Se il file mancante contasse come "da
+    riprendere", ogni giro dopo una consegna riscaricherebbe tutto lo storico.
+
+    Per riprenderla di proposito si cancella la sua riga da `.scaricate.json`,
+    ed è il caso coperto dal test qui sopra sull'indice vuoto.
+    """
+    index = {"0FPR00000000001": "consegnata.xml"}
+    assert registered_as(_fattura(), index) == "consegnata.xml"
+
+
+def test_file_ancora_in_archivio(tmp_path: Path) -> None:
+    (tmp_path / "IT01234567890_AbCdE.xml").write_text("finto", encoding="utf-8")
+
+    trovato = stored_file(tmp_path, "IT01234567890_AbCdE.xml")
 
     assert trovato is not None
     assert trovato.name == "IT01234567890_AbCdE.xml"
 
 
-def test_fattura_non_presente_nell_indice(tmp_path: Path) -> None:
-    index = {"0FPR99999999999": "altra.xml"}
-    assert already_downloaded(tmp_path, _fattura(), index) is None
-
-
-def test_indice_vuoto(tmp_path: Path) -> None:
-    assert already_downloaded(tmp_path, _fattura(), {}) is None
-
-
-def test_file_cancellato_a_mano_va_riscaricato(tmp_path: Path) -> None:
-    """L'indice dice che c'è, ma il file non esiste più: va riscaricata.
-
-    Fidarsi dell'indice e basta lascerebbe un buco nell'archivio in silenzio.
-    """
-    index = {"0FPR00000000001": "sparito.xml"}
-    assert already_downloaded(tmp_path, _fattura(), index) is None
+def test_file_non_piu_in_archivio(tmp_path: Path) -> None:
+    """Serve solo a scegliere il messaggio da stampare, non a riscaricare."""
+    assert stored_file(tmp_path, "sparito.xml") is None
 
 
 def test_indice_salvato_e_riletto(tmp_path: Path) -> None:

@@ -111,23 +111,39 @@ def download_all(
     `open_detail` arriva da fuori invece di essere importata qui: `consultation`
     usa questo modulo, e importarlo a sua volta creerebbe un import circolare.
 
-    Le fatture già scaricate vengono saltate: se ieri hai preso le prime venti
-    e oggi ne chiedi trenta, riscarichiamo solo le dieci nuove. Serve anche al
-    cron, che altrimenti riscaricherebbe ogni notte tutto lo storico.
+    Una fattura registrata nell'indice non si riscarica MAI, nemmeno se il suo
+    file non è più nella cartella: gli XML vengono consegnati alla contabilità
+    e l'archivio locale si svuota di proposito. Se il file mancante contasse
+    come "da riprendere", ogni giro dopo una consegna riscaricherebbe tutto lo
+    storico, e sulle ricevute rifarebbe la presa visione.
+
+    Per riscaricare una fattura di proposito: cancella la sua riga da
+    `.scaricate.json` (è un file leggibile, una riga per fattura). È la via
+    d'uscita, ed è volutamente manuale.
     """
     folder = destination_dir(kind)
     folder.mkdir(parents=True, exist_ok=True)
     index = load_index(folder)
 
     saved: list[Path] = []
+    skipped = 0
+    new_files = 0
 
     for number, invoice in enumerate(invoices, start=1):
         label = f"[{number}/{len(invoices)}] {invoice.number}"
 
-        existing = already_downloaded(folder, invoice, index)
-        if existing:
-            print(f"  = {label}: già presente ({existing.name})")
-            saved.append(existing)
+        registered = registered_as(invoice, index)
+        if registered:
+            # Saltata in entrambi i casi: cambia solo cosa ti diciamo, perché
+            # "ce l'ho qui" e "l'ho già consegnata" sono due situazioni che a
+            # te interessa distinguere.
+            skipped += 1
+            existing = stored_file(folder, registered)
+            if existing:
+                print(f"  = {label}: già presente ({existing.name})")
+                saved.append(existing)
+            else:
+                print(f"  = {label}: già scaricata ({registered}), non più in archivio")
             continue
 
         print(f"  . {label}: apro il dettaglio...")
@@ -137,6 +153,7 @@ def download_all(
         if path:
             print(f"  + {label}: salvata in {path}")
             saved.append(path)
+            new_files += 1
 
             # L'indice si aggiorna subito, non alla fine: se interrompi a metà,
             # quello che è stato scaricato resta registrato come scaricato.
@@ -145,7 +162,25 @@ def download_all(
 
         time.sleep(PAUSE_SECONDS)
 
+    _print_summary(len(invoices), skipped, new_files, folder)
     return saved
+
+
+def _print_summary(requested: int, skipped: int, new_files: int, folder: Path) -> None:
+    """Riepiloga il giro: quante saltate, quante prese, quante non riuscite.
+
+    Il conto va esposto per esteso perché "3 file su 20" senza spiegazione
+    sembra un guasto, mentre di norma significa che le altre 17 erano già
+    state prese in passato.
+    """
+    attempted = requested - skipped
+    failed = attempted - new_files
+
+    print(f"\nRichieste {requested}:")
+    print(f"  {skipped} già scaricate in passato (saltate)")
+    print(f"  {new_files} scaricate ora in {folder}")
+    if failed:
+        print(f"  {failed} NON riuscite: rilancia per riprovare solo queste")
 
 
 def load_index(folder: Path) -> dict[str, str]:
@@ -180,26 +215,26 @@ def save_index(folder: Path, index: dict[str, str]) -> None:
     )
 
 
-def already_downloaded(
-    folder: Path, invoice: Invoice, index: dict[str, str]
-) -> Path | None:
-    """Dice se questa fattura è già stata scaricata, PRIMA di cliccare.
+def registered_as(invoice: Invoice, index: dict[str, str]) -> str | None:
+    """Nome del file con cui questa fattura risulta già scaricata, se risulta.
 
-    Il controllo deve avvenire prima del click perché è il click stesso a
+    L'indice è la fonte di verità su cosa abbiamo già preso, e il controllo
+    deve avvenire PRIMA di aprire il dettaglio: è l'apertura stessa a
     registrare la presa visione sulle fatture ricevute.
 
-    Il nome del file lo sceglie il portale e non è ricavabile dai dati che
-    abbiamo (è partita IVA del trasmittente + un progressivo dello SdI): per
-    questo teniamo un indice che collega l'identificativo della fattura al
-    nome del file.
-
-    Se l'indice cita un file che non c'è più (l'hai cancellato o spostato),
-    la fattura va considerata da riscaricare: fidarsi dell'indice e basta
-    lascerebbe un buco nell'archivio senza dirlo a nessuno.
+    Perché serve un indice invece di guardare i file: il nome lo sceglie il
+    portale (partita IVA del trasmittente + un progressivo dello SdI) e non è
+    ricavabile dai dati che abbiamo in mano.
     """
-    filename = index.get(invoice.detail_id)
-    if not filename:
-        return None
+    return index.get(invoice.detail_id)
 
+
+def stored_file(folder: Path, filename: str) -> Path | None:
+    """Il file, se è ancora nell'archivio locale.
+
+    Che non ci sia non vuol dire che non sia stato scaricato: gli XML vengono
+    consegnati al commercialista e la cartella si svuota. Chi chiama distingue
+    i due casi solo per dirlo a schermo, non per decidere se riscaricare.
+    """
     path = folder / filename
     return path if path.exists() else None

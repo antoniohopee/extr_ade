@@ -30,7 +30,7 @@ from extr_ade.constants import (
     RECEIVED_ROUTE,
     SEARCH_BUTTON_NAME,
 )
-from extr_ade.downloader import destination_dir, download_all
+from extr_ade.downloader import download_all
 from extr_ade.invoices import (
     Invoice,
     filter_invoices,
@@ -351,10 +351,10 @@ def main() -> None:
                     chosen = ask_selection(shown)
                     if chosen:
                         print(f"\nScarico {len(chosen)} fatture...")
-                        saved = download_all(
-                            consultation, chosen, kind.value, open_detail
-                        )
-                        print(f"\n{len(saved)} file su {len(chosen)} in {destination_dir(kind.value)}")
+                        # Il riepilogo lo stampa `download_all`: distingue le
+                        # già scaricate dalle nuove, cosa che un "N su M" qui
+                        # non saprebbe fare.
+                        download_all(consultation, chosen, kind.value, open_detail)
 
                         # Il download ci lascia sull'ultimo dettaglio aperto:
                         # per continuare a lavorare serve tornare all'elenco.
