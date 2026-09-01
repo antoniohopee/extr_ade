@@ -231,3 +231,4 @@ data/
 *.xml.p7m
 storage_state.json
 !tests/fixtures/*.xml
+.DS_Store
