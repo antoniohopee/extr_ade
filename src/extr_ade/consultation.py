@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 
-from playwright.sync_api import Page
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
 from extr_ade.constants import (
     CONSULTATION_LINK_NAME,
@@ -24,13 +24,14 @@ from extr_ade.constants import (
     DETAIL_ROUTE,
     DOWNLOAD_BUTTON_NAME,
     DATE_TO_SELECTOR,
+    FILE_PENDING_SELECTOR,
     ISSUED_LINK_NAME,
     ISSUED_ROUTE,
     RECEIVED_LINK_NAME,
     RECEIVED_ROUTE,
     SEARCH_BUTTON_NAME,
 )
-from extr_ade.downloader import download_all
+from extr_ade.downloader import FilePendingError, download_all, safe_filename
 from extr_ade.invoices import (
     Invoice,
     filter_invoices,
@@ -307,11 +308,45 @@ def open_detail(page: Page, invoice: Invoice) -> None:
     Aspettiamo il bottone di download e non il caricamento generico: il
     contenuto del dettaglio arriva dopo, e senza questa attesa si finisce a
     guardare una pagina ancora vuota (già successo in diagnostica).
+
+    Solleva `FilePendingError` quando il portale dice che l'XML non è ancora
+    pronto: il dettaglio in quel caso si apre benissimo, è il file a non
+    esistere ancora.
+
+    Se non compare né il bottone né l'avviso solleva l'errore di Playwright,
+    ma prima salva
+    l'HTML della pagina in `data/`: chi chiama decide se fermarsi o passare
+    alla fattura successiva, noi ci assicuriamo che resti una traccia.
     """
     go_to_route(page, f"{DETAIL_ROUTE}{invoice.detail_id}")
-    page.wait_for_selector(
-        f"button:has-text('{DOWNLOAD_BUTTON_NAME}')", state="visible"
-    )
+
+    # Aspettiamo il primo dei due esiti possibili, non solo quello buono: o il
+    # bottone, o l'avviso che il file non è ancora pronto. Aspettare solo il
+    # bottone costava un minuto di timeout per poi dire "non aperto", quando
+    # la risposta era a schermo dal primo istante.
+    button = page.locator(f"button:has-text('{DOWNLOAD_BUTTON_NAME}')")
+    pending = page.locator(FILE_PENDING_SELECTOR)
+
+    try:
+        button.or_(pending).first.wait_for(state="visible")
+    except PlaywrightTimeout:
+        # Salviamo l'HTML del momento esatto e poi lasciamo passare l'errore:
+        # `download_all` lo intercetta e prosegue con le altre fatture.
+        #
+        # Serve la prova, non l'ipotesi. Alla prima occorrenza restava solo un
+        # timeout, che non dice se la pagina di dettaglio sia arrivata vuota,
+        # disegnata senza il bottone, o con un errore del portale: tre cause
+        # diverse che si riparano in tre modi diversi. Stessa scelta fatta in
+        # `wait_for_table` per l'elenco, e lì è ciò che ha sbloccato la diagnosi.
+        #
+        # Il nome del file porta l'identificativo della fattura: in un giro da
+        # dodici, due guasti non devono sovrascriversi a vicenda.
+        name = safe_filename(f"dettaglio_senza_bottone_{invoice.detail_id}.html")
+        describe_page(page, save_html_as=name)
+        raise
+
+    if pending.count():
+        raise FilePendingError(invoice.number)
 
 
 def main() -> None:

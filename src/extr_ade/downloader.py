@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from enum import StrEnum
 from pathlib import Path
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
@@ -100,6 +101,50 @@ def download_invoice(page: Page, invoice: Invoice, folder: Path) -> Path | None:
         return None
 
 
+class FilePendingError(Exception):
+    """L'XML della fattura non è ancora stato preparato dal portale.
+
+    Non è un guasto: il portale prepara il file entro 72 ore dalla consegna, e
+    fino ad allora al posto del bottone di download mostra un avviso. Ha una
+    sua eccezione perché va raccontato in modo diverso da un errore vero: qui
+    non c'è niente da riparare, basta ripassare domani.
+    """
+
+
+class DetailOutcome(StrEnum):
+    """Com'è andata l'apertura del dettaglio di una fattura."""
+
+    OK = "ok"
+    PENDING = "pending"
+    FAILED = "failed"
+
+
+def open_detail_safely(open_detail, page: Page, invoice: Invoice) -> DetailOutcome:
+    """Apre il dettaglio di una fattura, senza sollevare eccezioni.
+
+    Stessa scelta già fatta in `download_invoice`: in un giro da venti
+    fatture, una che va male non deve far fallire le altre diciannove. Prima
+    questo passo non era protetto, quindi un dettaglio che non si apriva
+    interrompeva l'intero giro e faceva perdere la sessione del browser.
+
+    Tre esiti e non due, perché "il file non è ancora pronto" non è un errore:
+    chiamarlo tale manderebbe a cercare un guasto che non esiste.
+    """
+    try:
+        open_detail(page, invoice)
+        return DetailOutcome.OK
+    except FilePendingError:
+        print(f"  ~ {invoice.number}: XML non ancora disponibile")
+        print("    (il portale lo prepara entro 72 ore dalla consegna)")
+        return DetailOutcome.PENDING
+    except PlaywrightTimeout:
+        print(f"  ! {invoice.number}: dettaglio non aperto entro il tempo massimo")
+        return DetailOutcome.FAILED
+    except Exception as error:  # noqa: BLE001 - vogliamo proseguire comunque
+        print(f"  ! {invoice.number}: dettaglio non aperto ({error})")
+        return DetailOutcome.FAILED
+
+
 def download_all(
     page: Page,
     invoices: list[Invoice],
@@ -128,6 +173,7 @@ def download_all(
     saved: list[Path] = []
     skipped = 0
     new_files = 0
+    pending = 0
 
     for number, invoice in enumerate(invoices, start=1):
         label = f"[{number}/{len(invoices)}] {invoice.number}"
@@ -147,7 +193,12 @@ def download_all(
             continue
 
         print(f"  . {label}: apro il dettaglio...")
-        open_detail(page, invoice)
+        outcome = open_detail_safely(open_detail, page, invoice)
+        if outcome is DetailOutcome.PENDING:
+            pending += 1
+            continue
+        if outcome is DetailOutcome.FAILED:
+            continue
 
         path = download_invoice(page, invoice, folder)
         if path:
@@ -162,23 +213,31 @@ def download_all(
 
         time.sleep(PAUSE_SECONDS)
 
-    _print_summary(len(invoices), skipped, new_files, folder)
+    _print_summary(len(invoices), skipped, new_files, pending, folder)
     return saved
 
 
-def _print_summary(requested: int, skipped: int, new_files: int, folder: Path) -> None:
+def _print_summary(
+    requested: int, skipped: int, new_files: int, pending: int, folder: Path
+) -> None:
     """Riepiloga il giro: quante saltate, quante prese, quante non riuscite.
 
     Il conto va esposto per esteso perché "3 file su 20" senza spiegazione
     sembra un guasto, mentre di norma significa che le altre 17 erano già
     state prese in passato.
+
+    Le fatture in attesa di predisposizione si contano a parte: finivano fra
+    le "NON riuscite" e mandavano a cercare un guasto che non c'è. Non sono
+    registrate nell'indice, quindi il prossimo giro le riprende da solo.
     """
     attempted = requested - skipped
-    failed = attempted - new_files
+    failed = attempted - new_files - pending
 
     print(f"\nRichieste {requested}:")
     print(f"  {skipped} già scaricate in passato (saltate)")
     print(f"  {new_files} scaricate ora in {folder}")
+    if pending:
+        print(f"  {pending} non ancora disponibili sul portale (riprova fra 72 ore)")
     if failed:
         print(f"  {failed} NON riuscite: rilancia per riprovare solo queste")
 

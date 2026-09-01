@@ -189,6 +189,21 @@ DETAIL_ROUTE = "#/fatture/dettaglio/"
 # browser e non da un client HTTP.
 DOWNLOAD_BUTTON_NAME = "Download file fattura"
 
+# Avviso che compare AL POSTO del bottone quando l'XML non è ancora pronto:
+# "Il file è in corso di predisposizione. Sarà disponibile entro 72 ore dalla
+# data di consegna."
+#
+# Verificato il 2026-09-01 sull'HTML di una fattura consegnata lo stesso
+# giorno (`data/dettaglio_senza_bottone_*.html`). Nel template il bottone sta
+# nel ramo `fileDownload===1` e questo avviso nel ramo `fileDownload===2`: o
+# c'è l'uno o c'è l'altro, mai entrambi.
+#
+# Il testo è quello del portale e possono cambiarlo quando vogliono. Se
+# cambia, questo selettore smette di agganciare e si torna al comportamento
+# vecchio: un minuto di attesa e l'HTML salvato in `data/`. Si degrada, non
+# si rompe.
+FILE_PENDING_SELECTOR = "p.alert-warning:has-text('in corso di predisposizione')"
+
 # Cartella dove finiscono gli XML: `fatture/` nella radice del progetto, divisa
 # in `fatture/emesse` e `fatture/ricevute`. Viene creata al primo download.
 #
