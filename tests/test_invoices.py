@@ -35,6 +35,13 @@ from extr_ade.invoices import (
         ("", Decimal("0")),  # cella vuota: succede, non è un errore
         ("  18,42  ", Decimal("18.42")),
         ("-5,00", Decimal("-5.00")),  # note di credito
+        # Dal 2026-09-22 la tabella scrive anche la valuta. Lo spazio prima
+        # dell'euro nel primo caso è quello unificatore (`\xa0`), che è
+        # proprio quello usato dal portale e a occhio non si distingue.
+        ("20,90\xa0€", Decimal("20.90")),
+        ("20,90 €", Decimal("20.90")),
+        ("1.234,56 €", Decimal("1234.56")),
+        ("-5,00 €", Decimal("-5.00")),
     ],
 )
 def test_parse_amount(testo: str, atteso: Decimal) -> None:
@@ -83,6 +90,18 @@ def test_split_client() -> None:
 def test_split_client_con_trattino_nel_nome() -> None:
     """Il nome può contenere trattini: si divide solo alla prima occorrenza."""
     identificativo, nome = split_client("01234567890 - Rossi - Bianchi snc")
+    assert identificativo == "01234567890"
+    assert nome == "Rossi - Bianchi snc"
+
+
+def test_split_client_a_capo() -> None:
+    """Forma della tabella nuova (2026-09-22): identificativo e nome su due righe."""
+    assert split_client("01234567890\nRossi srl") == ("01234567890", "Rossi srl")
+
+
+def test_split_client_a_capo_con_trattino_nel_nome() -> None:
+    """Col separatore nuovo, un trattino nel nome non deve tagliare niente."""
+    identificativo, nome = split_client("01234567890\nRossi - Bianchi snc")
     assert identificativo == "01234567890"
     assert nome == "Rossi - Bianchi snc"
 

@@ -148,35 +148,70 @@ INVOICE_CELL_SELECTOR = "th, td"
 
 # Posizione delle colonne che ci servono, nell'ordine in cui il sito le mostra.
 # Se un giorno il sito aggiunge una colonna, è qui che si aggiusta.
-COLUMN_NUMBER = 2  # Numero fattura / Documento
-COLUMN_DATE = 3  # Data emissione
-COLUMN_CLIENT = 4  # Identificativo cliente (P.IVA/CF + denominazione)
-COLUMN_TAXABLE = 5  # Imponibile / Importo
-COLUMN_TAX = 6  # Imposta
-COLUMN_SDI = 7  # Sdi / file
+#
+# Rimappate il 2026-09-22 dopo la riscrittura del portale: tutte scalate di
+# uno, perché la colonna che apre la riga non è più la stessa. La mappa non è
+# dedotta, è letta dalle intestazioni della tabella vera:
+#
+#   [0] Tipo fattura / Tipo documento      [5] Imposta
+#   [1] Numero fattura / Documento         [6] Sdi / file
+#   [2] Data emissione                     [7] Fatture consegnate e data consegna
+#   [3] Identificativo cliente             [8] Bollo virtuale
+#   [4] Imponibile / Importo               [9] Dettaglio Fattura
+COLUMN_NUMBER = 1  # Numero fattura / Documento
+COLUMN_DATE = 2  # Data emissione
+COLUMN_CLIENT = 3  # Identificativo cliente (P.IVA/CF + denominazione)
+COLUMN_TAXABLE = 4  # Imponibile / Importo
+COLUMN_TAX = 5  # Imposta
+COLUMN_SDI = 6  # Sdi / file
 
 # Dentro la cella del cliente ci sono due span: uno visibile con la sola
 # P.IVA, e uno per screen reader con "P.IVA - Denominazione". Leggiamo il
 # secondo, che è l'unico a contenere anche il nome.
 CLIENT_FULL_TEXT_SELECTOR = ".sr-only"
 
-# Link al dettaglio: il suo indirizzo finisce con l'identificativo della
-# fattura (es. `#/fatture/dettaglio/0FPR00000000001`).
-DETAIL_LINK_SELECTOR = "a[href*='/fatture/dettaglio/']"
+# Come si apre il dettaglio di una fattura, dal 2026-09-22.
+#
+# Prima era un link e bastava il suo indirizzo. Adesso nella riga c'è un
+# BOTTONE, e nella pagina non esiste più nessun href con `/fatture/dettaglio/`:
+# per questo `detail_id` risultava vuoto e i file di diagnostica finivano tutti
+# in `dettaglio_senza_bottone_.html`, sovrascrivendosi a vicenda.
+#
+# Il nome accessibile del bottone è "Dettaglio Fattura <identificativo>", quindi
+# serve a due cose: leggere l'identificativo dalla riga, e ritrovare il bottone
+# giusto quando è il momento di cliccarlo.
+DETAIL_BUTTON_PREFIX = "Dettaglio Fattura"
 
 # Paginazione: i risultati arrivano a blocchi. Ignorarla significherebbe
 # scaricare solo le prime fatture credendo di averle prese tutte.
-PAGINATION_SELECTOR = "nav[aria-label='Paginazione elenco fatture']"
-NEXT_PAGE_NAME = "Pagina successiva"
-FIRST_PAGE_NAME = "Prima pagina"
+#
+# Rifatta il 2026-09-22. Le differenze con la versione vecchia sono minime da
+# leggere e letali da ignorare: due sono solo maiuscole ("elenco" -> "Elenco",
+# "successiva" -> "Successiva"), e in un selettore per attributo le maiuscole
+# contano. Il risultato era che il `nav` non veniva trovato, la lettura si
+# fermava alla prima pagina e il programma NON lo diceva: 50 fatture su 238.
+#
+# La pagina contiene DUE nav di paginazione, uno per schermo grande e uno per
+# schermo piccolo, e solo uno dei due è a schermo. Il `:visible` serve a non
+# cliccare quello nascosto.
+PAGINATION_SELECTOR = "nav[aria-label='Paginazione Elenco fatture']:visible"
+
+# Ora sono <button class="page-link">, non più link. I nomi sono quelli
+# letti dall'HTML: "Prima Pagina", "Pagina Precedente", "Pagina 1", ...,
+# "Pagina Successiva", "Ultima Pagina".
+NEXT_PAGE_NAME = "Pagina Successiva"
+FIRST_PAGE_NAME = "Prima Pagina"
 
 
 # --- Dettaglio della singola fattura ------------------------------------------
 #
 # Verificati il 2026-07-30 sull'HTML della pagina di dettaglio.
 
-# Rotta del dettaglio: va completata con l'identificativo letto dalla tabella
-# (es. "0FPR00000000001").
+# NON USATA dal 2026-09-22, tenuta solo come promemoria.
+#
+# Nella SPA nuova il dettaglio non è raggiungibile per indirizzo: andando a
+# `/cons/cons-web/fatture/dettaglio/<id>` si viene rimbalzati sull'elenco.
+# Si apre solo cliccando il bottone nella riga (DETAIL_BUTTON_PREFIX).
 DETAIL_ROUTE = "#/fatture/dettaglio/"
 
 # Bottone che salva il file della fattura. La pagina stessa spiega che questo

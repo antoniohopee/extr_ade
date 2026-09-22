@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 
 from extr_ade.constants import (
     CLIENT_FULL_TEXT_SELECTOR,
@@ -29,7 +29,7 @@ from extr_ade.constants import (
     COLUMN_SDI,
     COLUMN_TAX,
     COLUMN_TAXABLE,
-    DETAIL_LINK_SELECTOR,
+    DETAIL_BUTTON_PREFIX,
     FIRST_PAGE_NAME,
     INVOICE_CELL_SELECTOR,
     INVOICE_ROW_SELECTOR,
@@ -83,8 +83,18 @@ def parse_amount(text: str) -> Decimal:
 
     Una cella vuota vale zero: nella tabella capita (per esempio l'imposta di
     una fattura senza IVA) e non è un errore.
+
+    Dal 2026-09-22 la tabella scrive gli importi con la valuta ("20,90 €"),
+    prima erano numeri nudi. Togliamo simbolo e spazi prima di convertire.
+    Fra gli spazi c'è anche quello unificatore (`\xa0`), che il portale usa
+    davanti all'euro: a schermo è identico a uno spazio normale, quindi un
+    `replace(" ", "")` da solo non basterebbe e l'errore sarebbe di quelli che
+    si guardano dieci minuti senza vedere niente di strano.
     """
-    cleaned = text.strip().replace(".", "").replace(",", ".")
+    cleaned = text.strip()
+    for junk in ("€", "\xa0", "\u202f", " "):
+        cleaned = cleaned.replace(junk, "")
+    cleaned = cleaned.replace(".", "").replace(",", ".")
     if not cleaned:
         return Decimal("0")
     try:
@@ -101,18 +111,32 @@ def parse_date(text: str) -> date:
         raise ValueError(f"Data non riconosciuta: {text!r}") from error
 
 
-def split_client(text: str) -> tuple[str, str]:
-    """Divide "P.IVA - Denominazione" in identificativo e nome.
+# Come il portale separa l'identificativo dalla denominazione, in ordine di
+# tentativo. L'a capo è la forma della tabella nuova (2026-09-22); il trattino
+# era quella vecchia, e lo teniamo perché il testo del cliente può arrivare
+# dallo span per screen reader (CLIENT_FULL_TEXT_SELECTOR), dove il formato
+# non è stato verificato dopo la riscrittura.
+CLIENT_SEPARATORS = ("\n", " - ")
 
-    Il separatore è " - ", ma anche la denominazione può contenere trattini
-    ("Rossi - Bianchi snc"): dividiamo quindi solo alla PRIMA occorrenza, o il
-    nome verrebbe troncato.
+
+def split_client(text: str) -> tuple[str, str]:
+    """Divide "P.IVA + Denominazione" in identificativo e nome.
+
+    Dividiamo alla PRIMA occorrenza del separatore: anche la denominazione può
+    contenere trattini ("Rossi - Bianchi snc"), e dividere ovunque troncherebbe
+    il nome.
+
+    Se nessun separatore aggancia, restituiamo tutto come identificativo e nome
+    vuoto. È un caso legittimo (a volte il portale ha solo la P.IVA), ma è anche
+    come si manifesterebbe un terzo formato che non conosciamo: nell'elenco a
+    terminale vedresti la P.IVA al posto della ragione sociale.
     """
-    identifier, separator, name = text.strip().partition(" - ")
-    if not separator:
-        # Nessun nome: capita quando il portale ha solo l'identificativo.
-        return identifier.strip(), ""
-    return identifier.strip(), name.strip()
+    text = text.strip()
+    for separator in CLIENT_SEPARATORS:
+        identifier, found, name = text.partition(separator)
+        if found:
+            return identifier.strip(), name.strip()
+    return text, ""
 
 
 def filter_invoices(
@@ -335,6 +359,28 @@ def _read_current_page(page: Page) -> list[Invoice]:
     return [_read_row(row) for row in page.locator(INVOICE_ROW_SELECTOR).all()]
 
 
+def read_detail_id(row: Locator) -> str:
+    """Legge l'identificativo della fattura dal bottone "Dettaglio Fattura".
+
+    Dal 2026-09-22 è l'unico posto della riga dove l'identificativo compare in
+    forma utilizzabile: il link con l'indirizzo non esiste più.
+
+    Restituisce stringa vuota se il bottone non c'è. Non è un errore da fermare
+    tutto: la riga si legge lo stesso, semplicemente quella fattura non si potrà
+    aprire. Chi scarica se ne accorge, perché senza identificativo non c'è nulla
+    da cliccare.
+    """
+    button = row.get_by_role("button", name=DETAIL_BUTTON_PREFIX)
+    if not button.count():
+        return ""
+
+    # Il nome accessibile può venire dall'aria-label oppure dal testo dentro al
+    # bottone: proviamo il primo e ripieghiamo sul secondo, invece di dare per
+    # scontato quale dei due usi il portale.
+    label = button.first.get_attribute("aria-label") or button.first.inner_text()
+    return label.strip().removeprefix(DETAIL_BUTTON_PREFIX).strip()
+
+
 def _read_row(row) -> Invoice:  # type: ignore[no-untyped-def]  # Locator di Playwright
     """Legge una singola riga della tabella."""
     cells = row.locator(INVOICE_CELL_SELECTOR)
@@ -350,11 +396,7 @@ def _read_row(row) -> Invoice:  # type: ignore[no-untyped-def]  # Locator di Pla
     )
     client_id, client_name = split_client(raw_client)
 
-    detail_link = row.locator(DETAIL_LINK_SELECTOR)
-    detail_id = ""
-    if detail_link.count():
-        href = detail_link.first.get_attribute("href") or ""
-        detail_id = href.rsplit("/", 1)[-1]
+    detail_id = read_detail_id(row)
 
     return Invoice(
         number=cells.nth(COLUMN_NUMBER).inner_text().strip(),
@@ -368,40 +410,104 @@ def _read_row(row) -> Invoice:  # type: ignore[no-untyped-def]  # Locator di Pla
     )
 
 
-def _go_to_first_page(page: Page) -> None:
-    """Riporta la tabella alla prima pagina, se c'è una paginazione."""
+def detail_button(page: Page, detail_id: str) -> Locator | None:
+    """Trova il bottone del dettaglio, sfogliando la tabella se serve.
+
+    Il click funziona solo sui bottoni della pagina di tabella visualizzata in
+    quel momento: le altre righe non sono nascoste, non esistono proprio nel
+    DOM. Siccome dopo la lettura la tabella torna alla prima pagina, tutto
+    quello che sta oltre la cinquantesima riga era irraggiungibile.
+
+    Cerchiamo prima dove siamo, poi in avanti, e solo se non basta
+    ricominciamo dalla prima pagina. Nell'uso normale le fatture arrivano
+    nell'ordine dell'elenco, quindi si avanza di una pagina per volta e il
+    giro completo sfoglia la tabella una volta sola.
+
+    Il giro da capo non è un lusso: mentre lavoriamo il portale riceve fatture
+    nuove (durante una sola sessione l'elenco è passato da 238 a 241), le righe
+    slittano fra le pagine, e una fattura può finire INDIETRO rispetto a dove
+    siamo arrivati. Cercare per nome ci difende dallo slittamento; ripartire da
+    capo ci difende dal cercarla solo in avanti.
+
+    Restituisce None se non c'è in nessuna pagina: a quel punto vuol dire
+    davvero che non è più nell'elenco.
+    """
+    name = f"{DETAIL_BUTTON_PREFIX} {detail_id}"
+
+    def here() -> Locator | None:
+        button = page.get_by_role("button", name=name, exact=True)
+        return button.first if button.count() else None
+
+    def scan_forward() -> Locator | None:
+        while _go_to_next_page(page):
+            found = here()
+            if found is not None:
+                return found
+        return None
+
+    found = here() or scan_forward()
+    if found is not None:
+        return found
+
+    _go_to_first_page(page)
+    return here() or scan_forward()
+
+
+def _pagination_button(page: Page, name: str) -> Locator | None:
+    """Il bottone di paginazione con quel nome, se c'è ed è utilizzabile.
+
+    Restituisce None quando la paginazione non esiste (una pagina sola), quando
+    il bottone non c'è, o quando è disabilitato — cioè siamo già al capo della
+    fila. Dal 2026-09-22 la disabilitazione è l'attributo `disabled` sul bottone
+    stesso: prima bisognava leggere la classe del <li> genitore.
+    """
     navigation = page.locator(PAGINATION_SELECTOR)
     if not navigation.count():
-        return
+        return None
 
-    first_link = navigation.get_by_role("link", name=FIRST_PAGE_NAME)
-    if not first_link.count():
-        return
+    button = navigation.first.get_by_role("button", name=name, exact=True)
+    if not button.count() or button.first.is_disabled():
+        return None
 
-    container_class = first_link.first.locator("xpath=..").get_attribute("class") or ""
-    if "disabled" in container_class:
-        return  # già sulla prima pagina
+    return button.first
 
-    first_link.first.click()
+
+def _go_to_first_page(page: Page) -> None:
+    """Riporta la tabella alla prima pagina, se c'è una paginazione."""
+    button = _pagination_button(page, FIRST_PAGE_NAME)
+    if button is None:
+        return  # una pagina sola, oppure ci siamo già
+
+    button.click()
     page.wait_for_load_state("networkidle")
 
 
 def _go_to_next_page(page: Page) -> bool:
-    """Va alla pagina successiva. Restituisce False se eravamo all'ultima."""
-    navigation = page.locator(PAGINATION_SELECTOR)
-    if not navigation.count():
+    """Va alla pagina successiva. Restituisce False se eravamo all'ultima.
+
+    Dopo il click aspettiamo che la PRIMA RIGA cambi, non solo che la rete si
+    calmi. La tabella si ridisegna da sola senza ricaricare la pagina, quindi
+    `networkidle` può dirsi soddisfatto mentre a schermo ci sono ancora le
+    righe di prima: le rileggeremmo, e il giro finirebbe con dei doppioni e
+    delle fatture mai viste. Aspettare un cambiamento vero toglie il dubbio.
+    """
+    button = _pagination_button(page, NEXT_PAGE_NAME)
+    if button is None:
         return False
 
-    next_link = navigation.get_by_role("link", name=NEXT_PAGE_NAME)
-    if not next_link.count():
-        return False
+    rows = page.locator(INVOICE_ROW_SELECTOR)
+    before = rows.first.inner_text() if rows.count() else ""
 
-    # Il sito segna l'ultima pagina mettendo la classe `disabled` sul <li> che
-    # contiene il link, non sul link stesso: guardiamo il genitore.
-    container_class = next_link.first.locator("xpath=..").get_attribute("class") or ""
-    if "disabled" in container_class:
-        return False
-
-    next_link.first.click()
+    button.click()
     page.wait_for_load_state("networkidle")
+
+    if before:
+        page.wait_for_function(
+            """([selector, before]) => {
+                const row = document.querySelector(selector);
+                return row && row.innerText !== before;
+            }""",
+            arg=[INVOICE_ROW_SELECTOR, before],
+        )
+
     return True
