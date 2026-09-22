@@ -14,31 +14,36 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
+from urllib.parse import urljoin, urlsplit
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout
 
 from extr_ade.constants import (
     CONSULTATION_LINK_NAME,
     CONSULTATION_PATH,
     DATE_FROM_SELECTOR,
-    DETAIL_ROUTE,
     DOWNLOAD_BUTTON_NAME,
     DATE_TO_SELECTOR,
+    DETAIL_OPEN_TIMEOUT_MS,
     FILE_PENDING_SELECTOR,
     ISSUED_LINK_NAME,
     ISSUED_ROUTE,
     RECEIVED_LINK_NAME,
     RECEIVED_ROUTE,
     SEARCH_BUTTON_NAME,
+    SEARCH_HEADING_TIMEOUT_MS,
+    SEARCHED_PERIOD_TEXT,
 )
 from extr_ade.downloader import FilePendingError, download_all, safe_filename
 from extr_ade.invoices import (
     Invoice,
+    detail_button,
     filter_invoices,
     format_invoices,
     parse_date,
     parse_selection,
     read_invoices,
+    wait_for_table,
 )
 from extr_ade.credentials import get_credentials
 from extr_ade.identity import (
@@ -139,18 +144,29 @@ def ask_invoice_kind() -> InvoiceKind:
 
 
 def go_to_route(page: Page, route: str) -> None:
-    """Sposta l'applicazione su una rotta interna (la parte dopo il `#`).
+    """Sposta l'applicazione su una rotta interna.
 
     Perché non clicchiamo la voce di menu, che sarebbe la cosa più naturale:
     dalla pagina di dettaglio il menu di sinistra è richiuso, e il link "Le tue
     fatture emesse" non è cliccabile. Il click funzionava solo finché
     restavamo sull'elenco.
 
-    Aspettiamo controllando l'indirizzo e non un evento di navigazione: qui la
-    pagina non ricarica mai, quindi quell'evento non arriverebbe.
+    2026-09-22: il portale ha sostituito l'applicazione di consultazione.
+    Quella vecchia era AngularJS e navigava per hash (`#/fatture/emesse`),
+    quella nuova è una SPA con routing a *path* (`/cons/cons-web/fatture/
+    emesse`, come si legge negli href del menu). Scrivere `location.hash` non
+    naviga più: l'hash viene appiccicato alla home e basta, e siccome scrivere
+    l'hash riesce sempre, la vecchia attesa si diceva soddisfatta mentre la
+    pagina era rimasta ferma. Il guasto si vedeva più avanti, come "tabella
+    non comparsa".
+
+    Ora navighiamo al path e aspettiamo l'indirizzo. Le rotte in `constants`
+    sono rimaste nella vecchia forma con il `#`: lo togliamo qui, in un punto
+    solo, invece di cambiare le costanti e dover toccare anche i richiami.
     """
-    page.evaluate("hash => { window.location.hash = hash; }", route)
-    page.wait_for_function("r => window.location.hash.startsWith(r)", arg=route)
+    path = CONSULTATION_PATH + route.lstrip("#")
+    page.goto(urljoin(page.url, path))
+    page.wait_for_url(f"**{path}**")
     page.wait_for_load_state("networkidle")
 
 
@@ -298,12 +314,138 @@ def ask_selection(invoices: list[Invoice]) -> list[Invoice]:
             print(f"  -> {error}")
 
 
+class DetailDidNotOpenError(RuntimeError):
+    """Il click c'è stato ma il dettaglio non si è aperto.
+
+    Tenuta separata dal caso "il dettaglio è aperto ma manca il bottone di
+    download": sono due guasti con due rimedi diversi, e finché il programma
+    non li distingueva, il secondo (che un giorno ci dirà che il selettore
+    dell'avviso delle 72 ore è da rifare) restava nascosto sotto il primo.
+    """
+
+
+def open_by_click(page: Page, button: Locator, invoice: Invoice) -> None:
+    """Clicca il bottone del dettaglio e si assicura che si sia davvero aperto.
+
+    Il 2026-09-22, su un giro di 28 fatture, il primo click non ha avuto alcun
+    effetto: siamo rimasti sull'elenco e abbiamo passato i 60 secondi di attesa
+    a cercare il bottone di download su una pagina che non era il dettaglio.
+    Le due fatture successive, identiche in tutto (stesso giorno, stessa
+    consegna, bottone con lo stesso markup), si sono aperte senza problemi.
+
+    Perché quel click si sia perso NON lo sappiamo. L'unica particolarità è che
+    era il primo dopo una ricerca per date, cioè su una tabella appena
+    ridisegnata. Resta un sospetto, non una diagnosi.
+
+    Per questo il rimedio non prova a indovinare la causa: controlla l'effetto.
+    Se l'indirizzo non diventa quello del dettaglio, il click è andato perso e
+    se ne fa un altro. Uno solo: se non funziona due volte, il problema non è
+    un click perso e insistere non aiuta.
+    """
+    for attempt in (1, 2):
+        button.click()
+        try:
+            page.wait_for_url(
+                lambda url: not on_list_url(url), timeout=DETAIL_OPEN_TIMEOUT_MS
+            )
+            return
+        except PlaywrightTimeout:
+            if attempt == 1:
+                print(f"    {invoice.number}: il dettaglio non si è aperto, riprovo...")
+
+    raise DetailDidNotOpenError(
+        f"{invoice.number}: il dettaglio non si è aperto nemmeno al secondo "
+        f"click. Siamo rimasti sull'elenco, quindi non è il bottone di "
+        f"download a mancare: è il click a non avere effetto."
+    )
+
+
+class DetailNotOnPageError(RuntimeError):
+    """Il bottone del dettaglio non è cliccabile: la fattura non è a schermo.
+
+    Distinta dalle altre perché la causa è nostra (stiamo guardando la pagina
+    di tabella sbagliata), non del portale: confonderla con un guasto del sito
+    manderebbe a cercare dalla parte sbagliata.
+    """
+
+
+def on_list(page: Page) -> bool:
+    """Dice se il browser è sull'elenco delle fatture (e non su un dettaglio).
+
+    Guardiamo l'INDIRIZZO, non il contenuto. Il primo tentativo controllava se
+    esistesse una tabella, ed era sbagliato: anche il dettaglio ha tabelle (i
+    dati contabili), quindi il controllo rispondeva sempre di sì e il ritorno
+    all'elenco non veniva mai eseguito. Il giro scaricava la prima fattura e
+    dava tutte le altre per "non più nell'elenco".
+
+    L'elenco sta su `/cons/cons-web/fatture/emesse` (o `/ricevute`); il
+    dettaglio aggiunge in fondo l'identificativo interno della fattura. Quella
+    differenza è netta e l'abbiamo vista sul portale vero.
+    """
+    return on_list_url(page.url)
+
+
+def on_list_url(url: str) -> bool:
+    """Come `on_list`, ma su un indirizzo già in mano.
+
+    Serve separata perché `wait_for_url` passa l'indirizzo come stringa, non
+    la pagina: senza questa, la stessa regola finirebbe scritta due volte.
+    """
+    path = urlsplit(url).path.rstrip("/")
+    return path.endswith(("/fatture/emesse", "/fatture/ricevute"))
+
+
+def back_to_list(page: Page) -> None:
+    """Riporta il browser sull'elenco, se siamo rimasti su un dettaglio.
+
+    Dopo aver scaricato un file restiamo fermi sulla pagina di dettaglio
+    (l'indirizzo diventa `/cons/cons-web/fatture/emesse/<id-interno>`). Lì non
+    esiste nessuna tabella, quindi la fattura successiva non ha nessun bottone
+    da cliccare: è il motivo per cui un giro da tre fatture ne scaricava una
+    sola e dava le altre due per "non più nell'elenco".
+
+    Proviamo prima il tasto indietro del browser, e solo se non basta
+    rinavighiamo. Non è pignoleria: rinavigare ricarica l'applicazione e
+    riporta la tabella alla prima pagina, mentre il tasto indietro ha almeno
+    una possibilità di riconsegnarci la pagina dove eravamo. Con le fatture
+    sparse su cinque pagine, la differenza è fra sfogliare una volta sola o
+    sfogliare da capo per ogni fattura.
+
+    Se siamo già sull'elenco non facciamo niente: la funzione si può chiamare
+    sempre, anche sulla prima fattura del giro.
+    """
+    if on_list(page):
+        return
+
+    page.go_back()
+    page.wait_for_load_state("networkidle")
+    if on_list(page):
+        return
+
+    # Il tasto indietro non ci ha riportati sull'elenco: ci andiamo per
+    # indirizzo. Costa una ripartenza dell'applicazione, ma è l'unica strada
+    # che sappiamo funzionare, ed è meglio di un giro che fallisce.
+    go_to_route(page, ISSUED_ROUTE if "/ricevute" not in page.url else RECEIVED_ROUTE)
+    wait_for_table(page)
+
+
 def open_detail(page: Page, invoice: Invoice) -> None:
     """Apre la pagina di dettaglio di una fattura.
 
-    Andiamo diretti alla rotta invece di cliccare il link nella tabella:
-    dopo aver letto tutte le pagine la tabella resta sull'ultima, quindi
-    "il link numero 3" non è la fattura numero 3 dell'elenco che hai davanti.
+    Si apre CLICCANDO il bottone della riga. Dal 2026-09-22 non c'è
+    alternativa: andando all'indirizzo `/cons/cons-web/fatture/dettaglio/<id>`
+    la SPA rimbalza sull'elenco, come si vede dall'URL stampato quando fallisce.
+
+    Cerchiamo il bottone per nome completo ("Dettaglio Fattura <id>") e non per
+    posizione. La posizione sarebbe sbagliata: dopo aver sfogliato la tabella,
+    "il terzo bottone" non è la terza fattura dell'elenco che hai davanti.
+
+    Il bottone giusto lo trova `detail_button`, che sfoglia la tabella se la
+    fattura non è nella pagina visualizzata: il click arriva solo alle righe
+    presenti in quel momento nel DOM, e dopo la lettura la tabella torna alla
+    prima pagina. `DetailNotOnPageError` resta, ma ora significa che la
+    fattura non è in NESSUNA pagina, non che stavamo guardando quella
+    sbagliata.
 
     Aspettiamo il bottone di download e non il caricamento generico: il
     contenuto del dettaglio arriva dopo, e senza questa attesa si finisce a
@@ -318,7 +460,32 @@ def open_detail(page: Page, invoice: Invoice) -> None:
     l'HTML della pagina in `data/`: chi chiama decide se fermarsi o passare
     alla fattura successiva, noi ci assicuriamo che resti una traccia.
     """
-    go_to_route(page, f"{DETAIL_ROUTE}{invoice.detail_id}")
+    if not invoice.detail_id:
+        raise DetailNotOnPageError(
+            f"{invoice.number}: nella riga non c'è il bottone del dettaglio, "
+            f"quindi non so cosa cliccare."
+        )
+
+    back_to_list(page)
+
+    button = detail_button(page, invoice.detail_id)
+    if button is None:
+        # Salviamo dove siamo finiti PRIMA di arrenderci.
+        #
+        # Qui "non trovato" ha almeno due significati molto diversi: la fattura
+        # non è più nell'elenco, oppure non siamo affatto sull'elenco. Senza
+        # l'HTML del momento i due casi si confondono, e in questo progetto è
+        # già costato due diagnosi sbagliate. L'URL stampato basta a separarli.
+        name = safe_filename(f"dettaglio_non_trovato_{invoice.detail_id}.html")
+        describe_page(page, save_html_as=name)
+        raise DetailNotOnPageError(
+            f"{invoice.number}: bottone del dettaglio non trovato in nessuna "
+            f"pagina della tabella. Guarda l'HTML appena salvato: dice se siamo "
+            f"sull'elenco (allora la fattura non c'è più) o su un'altra pagina "
+            f"(allora è il ritorno all'elenco che non funziona)."
+        )
+
+    open_by_click(page, button, invoice)
 
     # Aspettiamo il primo dei due esiti possibili, non solo quello buono: o il
     # bottone, o l'avviso che il file non è ancora pronto. Aspettare solo il

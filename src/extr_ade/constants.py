@@ -140,6 +140,21 @@ DATE_FROM_SELECTOR = "#dal"
 DATE_TO_SELECTOR = "#al"
 SEARCH_BUTTON_NAME = "Cerca"
 
+# L'intestazione dove il portale dichiara cosa ha cercato, per esempio
+# "Fatture individuate (238) nel periodo 01/07/2026 - 22/09/2026". È l'unico
+# posto in cui il sito dice quale periodo ha usato davvero: serve a non
+# lavorare in silenzio su un periodo diverso da quello chiesto.
+SEARCHED_PERIOD_TEXT = "Fatture individuate"
+
+# Quanto aspettare quell'intestazione dopo aver cliccato "Cerca". Breve: è una
+# riga informativa, non deve rallentare il giro se il portale cambia il testo.
+SEARCH_HEADING_TIMEOUT_MS = 10_000
+
+# Quanto aspettare che il dettaglio si apra dopo il click. Corto di proposito:
+# se il click ha funzionato l'indirizzo cambia subito, e aspettare di più
+# significherebbe solo ritardare il secondo tentativo.
+DETAIL_OPEN_TIMEOUT_MS = 5_000
+
 # Righe della tabella dei risultati. La prima cella di ogni riga è un <th>,
 # non un <td>: leggendo solo i <td> si perderebbe una colonna e tutte le altre
 # risulterebbero spostate di uno.
