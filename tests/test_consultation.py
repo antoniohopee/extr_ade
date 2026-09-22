@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from extr_ade.consultation import on_list, on_list_url
+from extr_ade.consultation import on_list, on_list_url, to_input_date
 
 BASE = "https://ivaservizi.agenziaentrate.gov.it/cons/cons-web"
 
@@ -66,6 +66,29 @@ def test_on_list_riconosce_dettaglio() -> None:
 )
 def test_on_list_riconosce_altre_pagine(url: str) -> None:
     assert on_list(FakePage(url)) is False
+
+
+# --- date per il form ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("scritta", "attesa"),
+    [
+        ("01/07/2026", "2026-07-01"),
+        ("22/09/2026", "2026-09-22"),
+        ("31/12/2026", "2026-12-31"),
+        ("  01/07/2026  ", "2026-07-01"),  # `parse_date` tollera gli spazi
+    ],
+)
+def test_to_input_date(scritta: str, attesa: str) -> None:
+    """Il campo del sito e' <input type="date">: vuole aaaa-mm-gg."""
+    assert to_input_date(scritta) == attesa
+
+
+def test_to_input_date_rifiuta_formato_sbagliato() -> None:
+    """Meglio fermarsi qui che scrivere nel campo una data che non verra' letta."""
+    with pytest.raises(ValueError, match="Data non riconosciuta"):
+        to_input_date("2026-07-01")
 
 
 # --- la stessa regola, su un indirizzo gia' in mano ---------------------------

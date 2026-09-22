@@ -241,23 +241,116 @@ def ask_search_options() -> SearchOptions:
     )
 
 
+def to_input_date(text: str) -> str:
+    """Converte una data all'italiana nel formato che vuole il campo del sito.
+
+    "01/07/2026" -> "2026-07-01"
+
+    Dal 2026-09-22 `#dal` e `#al` sono `<input type="date">`. Un campo di quel
+    tipo accetta SOLO la forma `aaaa-mm-gg`: scriverci dentro "01/07/2026" non
+    dà una data sbagliata, fa proprio fallire la scrittura.
+
+    All'utente continuiamo a chiedere gg/mm/aaaa, che è come le date si
+    scrivono qui: la traduzione è un problema del programma, non suo.
+    """
+    return parse_date(text).isoformat()
+
+
+class DateOutOfRangeError(ValueError):
+    """La data chiesta è fuori dall'intervallo che il campo del sito accetta."""
+
+
+def fill_date(page: Page, selector: str, text: str) -> None:
+    """Scrive una data nel form, dopo aver controllato che il sito la accetti.
+
+    Il controllo non è pignoleria. I campi dichiarano `min` e `max` (il 2026
+    -09-22: dal 2015-01-01 a oggi), e una data fuori da lì viene scritta senza
+    proteste ma **la ricerca viene ignorata in silenzio**: il portale risponde
+    col periodo di default e tu lavori su 241 fatture credendo di averne
+    chieste 82. È successo, ed è costata mezz'ora di diagnosi.
+
+    Leggiamo `min` e `max` dal campo invece di scriverli qui: sono decisi dal
+    portale e cambiano ogni giorno (il `max` è la data odierna).
+    """
+    wanted = to_input_date(text)
+
+    lowest = page.get_attribute(selector, "min")
+    highest = page.get_attribute(selector, "max")
+    if lowest and wanted < lowest:
+        raise DateOutOfRangeError(
+            f"{text}: il portale accetta date a partire dal "
+            f"{date.fromisoformat(lowest):%d/%m/%Y}."
+        )
+    if highest and wanted > highest:
+        raise DateOutOfRangeError(
+            f"{text}: il portale accetta date fino al "
+            f"{date.fromisoformat(highest):%d/%m/%Y}."
+        )
+
+    page.fill(selector, wanted)
+
+
 def search_by_date(page: Page, date_from: str | None, date_to: str | None) -> None:
     """Compila il form di ricerca per data e avvia la ricerca.
 
     Se non è stata indicata nessuna data non tocchiamo niente: la sezione
     arriva già con un risultato di default, e cliccare "Cerca" a vuoto
     significherebbe solo aspettare una risposta identica.
+
+    NOTA, da verificare sul campo: nel form la data "Dal" è marcata come
+    obbligatoria ("Data di emissione Dal : *"). Cercare indicando solo "al"
+    potrebbe non funzionare, ma non l'abbiamo provato.
     """
     if not (date_from or date_to):
         return
 
     if date_from:
-        page.fill(DATE_FROM_SELECTOR, date_from)
+        fill_date(page, DATE_FROM_SELECTOR, date_from)
     if date_to:
-        page.fill(DATE_TO_SELECTOR, date_to)
+        fill_date(page, DATE_TO_SELECTOR, date_to)
 
-    page.get_by_role("button", name=SEARCH_BUTTON_NAME).click()
+    # `exact=True` non è un vezzo: senza, il nome viene cercato come
+    # sottostringa e nella pagina nuova quattro bottoni contengono "Cerca"
+    # ("Ricerca", "Ricerca avanzata", l'aiuto, e quello buono). Playwright si
+    # ferma invece di tirare a indovinare, e fa bene.
+    #
+    # Attenzione a non generalizzare: altrove il match parziale serve, perché
+    # il nome accessibile continua oltre la parte che conosciamo (il bottone
+    # del dettaglio porta l'identificativo, quello di download ripete il
+    # numero Sdi). Lì `exact=True` non troverebbe più niente.
+    page.get_by_role("button", name=SEARCH_BUTTON_NAME, exact=True).click()
     page.wait_for_load_state("networkidle")
+
+    print(f"  {searched_period(page)}")
+
+
+def searched_period(page: Page) -> str:
+    """Il periodo che il portale dichiara di aver cercato.
+
+    Nell'intestazione della sezione il sito scrive, per esempio, "Fatture
+    individuate (238) nel periodo 01/07/2026 - 22/09/2026". È il portale a
+    dirci su cosa ha lavorato: se non coincide con le date chieste, la ricerca
+    non è andata dove credevamo.
+
+    Lo stampiamo a ogni ricerca e non solo in diagnostica: una ricerca che
+    fallisce in silenzio ti lascia a lavorare sul periodo sbagliato senza
+    nessun segnale, ed è il tipo di errore che ti accorgi di aver fatto molto
+    dopo.
+
+    Se l'intestazione non si trova non solleviamo niente: è un'informazione in
+    più, non deve poter far fallire una ricerca che magari funziona.
+    """
+    heading = page.get_by_text(SEARCHED_PERIOD_TEXT).first
+    try:
+        # Va ASPETTATA, non letta al volo: al ritorno dal "Cerca" la pagina si
+        # sta ancora ridisegnando, e il primo tentativo (2026-09-22) leggeva il
+        # vuoto proprio mentre la ricerca era andata a buon fine. Una riga di
+        # controllo che dice il falso è peggio di una riga che manca.
+        heading.wait_for(timeout=SEARCH_HEADING_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        return "(il portale non dichiara il periodo cercato)"
+
+    return " ".join(heading.inner_text().split())
 
 
 class Action(StrEnum):
@@ -539,7 +632,17 @@ def main() -> None:
                     if options.date_from or options.date_to:
                         # Le date si applicano sul sito: va rifatta la ricerca
                         # e riletta la tabella, non basta filtrare in memoria.
-                        search_by_date(consultation, options.date_from, options.date_to)
+                        try:
+                            search_by_date(
+                                consultation, options.date_from, options.date_to
+                            )
+                        except DateOutOfRangeError as error:
+                            # Non è un guasto, è una data che il sito non
+                            # accetta: lo diciamo e restiamo sull'elenco di
+                            # prima, invece di far cadere tutto il programma
+                            # dopo che il login è già stato fatto.
+                            print(f"  -> {error}")
+                            continue
                         print("Rileggo l'elenco...")
                         invoices = read_invoices(consultation)
                     shown = filter_invoices(
