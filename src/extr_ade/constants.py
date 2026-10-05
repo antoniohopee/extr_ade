@@ -254,6 +254,33 @@ DOWNLOAD_BUTTON_NAME = "Download file fattura"
 # si rompe.
 FILE_PENDING_SELECTOR = "p.alert-warning:has-text('in corso di predisposizione')"
 
+# --- quando è il portale a dire di no -----------------------------------------
+#
+# Due pagine diverse, lo stesso significato: la richiesta non è stata servita,
+# e non per colpa nostra. Le riconosce `portal.py`.
+
+# 1. Pagina di fuori servizio del sistema Fatture e Corrispettivi. Sostituisce
+#    l'intera applicazione: niente menu, niente tabella, solo il titolo
+#    "Il sistema fatture e corrispettivi non è al momento disponibile".
+#
+#    Verificata su 24 file identici del 2026-09-28 e 31 del 2026-10-05
+#    (`data/dettaglio_non_trovato_*.html`). Fra le due date il bundle
+#    dell'applicazione è cambiato e questo testo no: è la parte stabile.
+#
+#    Agganciamo solo la coda della frase. Il soggetto ("Il sistema fatture e
+#    corrispettivi") è il nome di un prodotto e può essere riscritto; "non è
+#    al momento disponibile" è la formula, e regge di più.
+PORTAL_DOWN_SELECTOR = "h1:has-text('non \u00e8 al momento disponibile')"
+
+# 2. Avviso di errore dell'applicazione, che invece resta in piedi: il menu
+#    c'è, il contenuto è sostituito da un riquadro rosso.
+#    Verificato il 2026-10-05 (`data/elenco_senza_tabella.html`).
+#
+#    Puntiamo al paragrafo e non al riquadro: il riquadro contiene anche il
+#    titolo "Errore" e il bottone "Esci", e ci ritroveremmo a stampare
+#    "Errore Si è verificato un errore sconosciuto Esci".
+PORTAL_ERROR_SELECTOR = "#error-msg .alert-danger p"
+
 # Cartella dove finiscono gli XML: `fatture/` nella radice del progetto, divisa
 # in `fatture/emesse` e `fatture/ricevute`. Viene creata al primo download.
 #

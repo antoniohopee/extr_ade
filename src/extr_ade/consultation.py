@@ -54,6 +54,7 @@ from extr_ade.identity import (
     select_user_type,
 )
 from extr_ade.login import browser_page, describe_page, login_failed, perform_login
+from extr_ade.portal import PortalDownError, raise_if_portal_down
 
 # Quanto aspettiamo che si apra un'eventuale nuova scheda prima di concludere
 # che il link si apre nella stessa. Basso di proposito: se la scheda non c'è,
@@ -522,6 +523,44 @@ def back_to_list(page: Page) -> None:
     wait_for_table(page)
 
 
+def recover_list(
+    page: Page, date_from: str | None = None, date_to: str | None = None
+) -> None:
+    """Riporta il browser sull'elenco rinavigando SEMPRE, senza scorciatoie.
+
+    Serve quando il portale ci ha risposto con la sua pagina di rifiuto.
+    `back_to_list` qui non basterebbe, ed è una trappola che vale la pena
+    conoscere: quella guarda l'indirizzo per decidere se siamo già a posto, e
+    l'indirizzo della pagina di rifiuto resta quello dell'elenco. Risultato:
+    si direbbe "ci siamo già" e non farebbe niente, mentre a schermo c'è una
+    pagina morta. È lo stesso inganno del 2026-09-22, quando il controllo
+    guardava "c'è una tabella?" e il dettaglio rispondeva di sì.
+
+    **Le date vanno rimesse, e non è un dettaglio.** Rinavigare riporta la
+    sezione al periodo predefinito: se stavi scaricando il risultato di una
+    ricerca per date, dopo il recupero quelle fatture non sono in NESSUNA
+    pagina dell'elenco. Il seguito sarebbe una fila di "bottone del dettaglio
+    non trovato" fino allo stop dopo cinque fallimenti, con il riepilogo che
+    dà la colpa alle fatture. Un rifiuto passeggero diventerebbe così un giro
+    intero perso — e per giunta con una diagnosi sbagliata, che è esattamente
+    la cosa che stiamo togliendo di mezzo.
+    """
+    go_to_route(page, ISSUED_ROUTE if "/ricevute" not in page.url else RECEIVED_ROUTE)
+    wait_for_table(page)
+
+    if not (date_from or date_to):
+        return
+
+    try:
+        search_by_date(page, date_from, date_to)
+    except DateOutOfRangeError as error:
+        # Può succedere solo se il giro scavalca la mezzanotte: il `max` dei
+        # campi è la data odierna e cambia da sé. Lo diciamo invece di
+        # proseguire su un elenco che non è quello che l'utente aveva.
+        print(f"    ATTENZIONE: non ho potuto rimettere il filtro per date ({error})")
+        print("    l'elenco adesso è quello del periodo predefinito.")
+
+
 def open_detail(page: Page, invoice: Invoice) -> None:
     """Apre la pagina di dettaglio di una fattura.
 
@@ -563,6 +602,14 @@ def open_detail(page: Page, invoice: Invoice) -> None:
 
     button = detail_button(page, invoice.detail_id)
     if button is None:
+        # Prima di accusare la tabella: è il portale che ha detto di no?
+        #
+        # Questo ramo stampava "bottone del dettaglio non trovato in nessuna
+        # pagina" e suggeriva due cause, nessuna delle quali era quella vera.
+        # Il 2026-09-28 lo ha fatto 24 volte di fila e il 2026-10-05 altre 31,
+        # sempre sulla stessa identica pagina di fuori servizio.
+        raise_if_portal_down(page)
+
         # Salviamo dove siamo finiti PRIMA di arrenderci.
         #
         # Qui "non trovato" ha almeno due significati molto diversi: la fattura
@@ -590,6 +637,11 @@ def open_detail(page: Page, invoice: Invoice) -> None:
     try:
         button.or_(pending).first.wait_for(state="visible")
     except PlaywrightTimeout:
+        # Stessa domanda dell'altro ramo, e per lo stesso motivo: un dettaglio
+        # che non si disegna e un portale che si rifiuta si assomigliano a
+        # schermo, ma vanno trattati in due modi diversi.
+        raise_if_portal_down(page)
+
         # Salviamo l'HTML del momento esatto e poi lasciamo passare l'errore:
         # `download_all` lo intercetta e prosegue con le altre fatture.
         #
@@ -610,6 +662,23 @@ def open_detail(page: Page, invoice: Invoice) -> None:
 
 
 def main() -> None:
+    try:
+        _session()
+    except PortalDownError as error:
+        # Il portale ha detto di no fuori dallo scaricamento (per esempio
+        # mentre apriva l'elenco), dove non c'è nessun ciclo che riprova.
+        #
+        # Serve chiuderla qui perché l'alternativa è una traccia di stack, e
+        # una traccia di stack dice "il programma è rotto" a chi la legge.
+        # È esattamente il fraintendimento che tutto questo lavoro toglie di
+        # mezzo: il messaggio deve essere del portale, non di Python.
+        print(f"\nIl portale ha risposto: «{error}»")
+        print("Non è un guasto del programma e non c'è niente da sistemare")
+        print("nel codice: riprova fra qualche minuto.")
+
+
+def _session() -> None:
+    """Una sessione di lavoro completa, dal login all'uscita."""
     with browser_page() as page:
         enter_workspace(page)
 
@@ -619,6 +688,13 @@ def main() -> None:
         kind = ask_invoice_kind()
         invoices = load_section(consultation, kind)
         shown = invoices
+
+        # Ultima ricerca per date applicata sul sito, o `(None, None)`.
+        #
+        # Serve al recupero dopo un rifiuto del portale: rinavigare azzera il
+        # filtro, e senza ricordarcelo le fatture che stavamo scaricando
+        # sparirebbero dall'elenco a metà giro.
+        search_dates: tuple[str | None, str | None] = (None, None)
 
         while True:
             print(f"\nFatture {kind.value}\n")
@@ -643,6 +719,7 @@ def main() -> None:
                             # dopo che il login è già stato fatto.
                             print(f"  -> {error}")
                             continue
+                        search_dates = (options.date_from, options.date_to)
                         print("Rileggo l'elenco...")
                         invoices = read_invoices(consultation)
                     shown = filter_invoices(
@@ -659,7 +736,13 @@ def main() -> None:
                         # Il riepilogo lo stampa `download_all`: distingue le
                         # già scaricate dalle nuove, cosa che un "N su M" qui
                         # non saprebbe fare.
-                        download_all(consultation, chosen, kind.value, open_detail)
+                        download_all(
+                            consultation,
+                            chosen,
+                            kind.value,
+                            open_detail,
+                            lambda page: recover_list(page, *search_dates),
+                        )
 
                         # Il download ci lascia sull'ultimo dettaglio aperto:
                         # per continuare a lavorare serve tornare all'elenco.
@@ -668,10 +751,15 @@ def main() -> None:
 
                 case Action.SWITCH:
                     kind = ask_invoice_kind()
+                    # `load_section` rinaviga, quindi il filtro per date non
+                    # è più applicato: va dimenticato anche qui, o il
+                    # recupero rimetterebbe una ricerca che non c'è più.
+                    search_dates = (None, None)
                     invoices = load_section(consultation, kind)
                     shown = invoices
 
                 case Action.RELOAD:
+                    search_dates = (None, None)
                     invoices = load_section(consultation, kind)
                     shown = invoices
 

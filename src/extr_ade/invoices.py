@@ -37,6 +37,7 @@ from extr_ade.constants import (
     PAGINATION_SELECTOR,
 )
 from extr_ade.login import describe_page
+from extr_ade.portal import raise_if_portal_down
 
 # Limite di sicurezza sul numero di pagine da sfogliare. Se la paginazione si
 # comportasse in modo imprevisto (per esempio un "avanti" che non avanza),
@@ -234,6 +235,13 @@ def wait_for_table(page: Page) -> bool:
     if result is not None:
         return result
 
+    # Prima di dare la colpa alla tabella, chiediamo alla pagina se per caso
+    # è il portale ad aver detto di no. Se lo ha detto, ricaricare non serve:
+    # il 2026-10-05 il ricaricamento ha solo rifatto la stessa domanda e
+    # ottenuto la stessa risposta, e il messaggio finale accusava il nostro
+    # codice di un problema che non aveva.
+    raise_if_portal_down(page)
+
     print("  la tabella non compare: ricarico la pagina e riprovo...")
     print("  (se avevi impostato delle date, vanno reimpostate)")
     page.reload(wait_until="domcontentloaded")
@@ -242,6 +250,10 @@ def wait_for_table(page: Page) -> bool:
     if result is not None:
         print("  recuperata: la tabella c'è dopo il ricaricamento.")
         return result
+
+    # Secondo controllo: il portale può essersi tirato indietro proprio
+    # adesso, cioè fra il primo controllo e il ricaricamento.
+    raise_if_portal_down(page)
 
     # Qui non c'è più niente da tentare. Salviamo l'HTML del momento esatto:
     # senza, resta solo un messaggio d'errore, e l'unica volta che è successo
